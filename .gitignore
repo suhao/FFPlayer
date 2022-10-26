@@ -30,3 +30,9 @@
 *.exe
 *.out
 *.app
+
+# User Object files
+/.vs
+/.sarif
+/*.user
+/x64
