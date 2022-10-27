@@ -9,8 +9,13 @@
 #include <filesystem>
 #include <functional>
 #include <iostream>
+#include <list>
+#include <math.h>
+#include <memory>
+#include <stdbool.h>
 #include <stdio.h>
 #include <tchar.h>
+#include <vector>
 
 #include <winstring.h>
 
@@ -20,6 +25,7 @@
 #include <wil/common.h>
 
 #include "SDL.h"
+#include "SDL_ttf.h"
 #include "SDL_types.h"
 
 extern "C" {
@@ -51,6 +57,258 @@ std::string SysWideToMultiByte(const std::wstring &wide, uint32_t code_page) {
 }
 
 } // namespace
+
+namespace Foundation {
+
+class Notepad {
+public:
+  Notepad() {
+    std::filesystem::path path(wil::GetModuleFileNameW<std::wstring>(nullptr));
+    path = path.parent_path().append("msyh.ttf");
+    if (std::filesystem::exists(path)) {
+      auto multi_byte_path = SysWideToMultiByte(path.c_str(), CP_ACP);
+      auto result = TTF_Init();
+      font = TTF_OpenFont(multi_byte_path.c_str(), 12);
+    }
+  }
+  ~Notepad() {
+    TTF_CloseFont(font);
+    font = nullptr;
+    TTF_Quit();
+  }
+
+  void write(SDL_Renderer *render, const std::string &text, int x, int y,
+             int width, int height = 20) {
+    if (!render || text.empty()) {
+      return;
+    }
+
+    SDL_Color color = {255, 0, 0, 255};
+    auto surface = TTF_RenderText_Blended(font, text.c_str(), color);
+    auto texture = SDL_CreateTextureFromSurface(render, surface);
+    SDL_Rect rect = {x, y, width, height};
+    SDL_RenderCopy(render, texture, nullptr, &rect);
+    SDL_DestroyTexture(texture);
+    SDL_FreeSurface(surface);
+  }
+
+private:
+  TTF_Font *font = nullptr;
+};
+
+void SDL_RenderDrawCircle(SDL_Renderer *render, int x, int y, int radius) {
+  float angle = 0;
+  constexpr auto step = 5.0f;
+  for (int i = 0; i < 360 / step; ++i) {
+    float prevRadian = angle * M_PI / 180.0f;
+    float nextRadian = (angle + step) * M_PI / 180.0f;
+    SDL_RenderDrawLine(
+        render, x + radius * cosf(prevRadian), y + radius * sinf(prevRadian),
+        x + radius * cosf(nextRadian), y + radius * sinf(nextRadian));
+    angle += step;
+  }
+}
+
+static const Uint64 gFrequency =
+    SDL_GetPerformanceFrequency() / 1000; // ticks of per ms.
+
+// 帧率FPS：1s内图像渲染的帧数，或者每秒图形处理器可以刷新几次
+// 渲染帧率：渲染前创建对象，渲染后计算并输出即可
+// 系统可渲染帧率/事件帧率/非渲染帧率：一次渲染结束到下次渲染开始的帧率
+class AutoFramesPerSecond {
+public:
+  AutoFramesPerSecond() {}
+  ~AutoFramesPerSecond() {}
+
+  auto fps(float *elapsedPerformanceTime) {
+    auto endCounter = SDL_GetPerformanceCounter();
+    auto elapsedCounter = endCounter - startCounter;
+    auto elapsedTime = elapsedCounter * 1.0f / gFrequency; // ms
+
+    if (elapsedPerformanceTime) {
+      *elapsedPerformanceTime = elapsedTime;
+    }
+
+    auto fps = 1 * 1000 / elapsedTime;
+    return fps;
+  }
+
+  void reset() { startCounter = SDL_GetPerformanceCounter(); }
+
+private:
+  Uint64 startCounter = SDL_GetPerformanceCounter();
+};
+
+namespace Particle {
+
+struct World {
+  struct Partical {
+    static constexpr float density = 0.15; // 粒子密度
+    int radius = 5;                        // 半径
+    int health = 0;                        // 生命值
+    int decreaseHealth = 1;                // 生命值减少步长
+    SDL_Color color;                       // 颜色
+    SDL_FPoint position;                   // 位置
+    SDL_FPoint direct;                     // 方向
+
+    void UpdateHealth(int health, int decrease) {
+      if (health != 0) {
+        this->health = health + rand() % 1000;
+      }
+
+      if (decrease == 0)
+        decrease = 1;
+      this->decreaseHealth =
+          (std::max)(decrease, rand() % (this->health / decrease * 10));
+    }
+  };
+
+  SDL_FPoint gravity;                                     // 重力
+  std::vector<std::shared_ptr<Partical>> healthParticals; // 健康粒子
+
+  static std::shared_ptr<World> CreateWorld(SDL_FPoint gravity) {
+    // srand(static_cast<unsigned>(time(NULL)));
+    auto world = std::make_shared<World>();
+    world->gravity = gravity;
+    return world;
+  }
+
+  void UpdateWorld(SDL_Renderer *render) {
+    auto &particals = healthParticals;
+    for (auto it = particals.begin(); it != particals.end();) {
+      if (!(*it))
+        continue;
+      auto obj = *it;
+      obj->position.x += obj->direct.x + gravity.x / 2.0;
+      obj->position.y += obj->direct.y + gravity.y / 2.0;
+      SDL_SetRenderDrawColor(render, obj->color.r, obj->color.g, obj->color.b,
+                             obj->color.a);
+      SDL_RenderDrawCircle(render, obj->position.x, obj->position.y,
+                           obj->radius);
+      obj->health -= obj->decreaseHealth;
+
+      if (obj->health <= 0) {
+        deadParticals.push_back(obj);
+        it = particals.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+
+  void UpdateDegree(float halfDegree, int health, SDL_Point position) {
+    shootNumber = static_cast<std::size_t>(
+        ceil(halfDegree * 2 * World::Partical::density));
+
+    if (shootNumber > particals.size()) {
+      srand(static_cast<unsigned>(time(NULL)));
+      std::size_t number = shootNumber - particals.size();
+      for (std::size_t i = 0; i < number; ++i) {
+        CreatePartical(health, position);
+      }
+      return;
+    }
+
+    if (shootNumber == healthParticals.size()) {
+      return;
+    }
+
+    if (shootNumber > healthParticals.size()) {
+      auto number = shootNumber - healthParticals.size();
+      for (std::size_t i = 0; i < number; ++i) {
+        auto it = deadParticals.front();
+        deadParticals.pop_front();
+        if (it) {
+          it->UpdateHealth(health, 1);
+        }
+        healthParticals.push_back(it);
+      }
+      return;
+    }
+
+    std::size_t number = shootNumber - particals.size();
+    for (std::size_t i = 0; i < number; ++i) {
+      auto index = (std::max)(std::size_t(0),
+                              std::size_t(rand() % healthParticals.size() - 1));
+      if (healthParticals[index]) {
+        healthParticals[index]->UpdateHealth(0, 3);
+      }
+    }
+  }
+
+private:
+  std::vector<std::shared_ptr<Partical>> particals;   // 粒子池
+  std::list<std::shared_ptr<Partical>> deadParticals; // 死亡粒子
+  std::size_t shootNumber = 0;                        // 发射粒子数量
+  std::shared_ptr<Partical> CreatePartical(int health, SDL_Point position) {
+    auto partical = std::make_shared<Partical>();
+    partical->radius = (std::max)(5, rand() % 10);
+    partical->color.r = rand() % 255;
+    partical->color.g = rand() % 255;
+    partical->color.b = rand() % 255;
+    partical->color.a = (std::max)(rand() % 255, 180);
+    partical->position.x = position.x;
+    partical->position.y = position.y;
+    partical->UpdateHealth(health, 1);
+
+    particals.push_back(partical);
+    healthParticals.push_back(partical);
+    return partical;
+  }
+};
+
+struct Launcher {
+  SDL_Point position;     // 发射器的位置
+  SDL_FPoint shootDirect; // 参考发射方向
+  int health = 100;       // 粒子参考生命值
+  float halfDegree;       // 发射口中发射中心的最大角度
+  std::weak_ptr<World> world;
+
+  static std::shared_ptr<Launcher> CreateLauncher(SDL_Point position,
+                                                  SDL_FPoint direct, int health,
+                                                  std::weak_ptr<World> world) {
+    auto w = world.lock();
+    if (!w)
+      return nullptr;
+
+    auto launcher = std::make_shared<Launcher>();
+    launcher->position = position;
+    launcher->shootDirect = direct;
+    launcher->health = health;
+    launcher->world = world;
+
+    return launcher;
+  }
+
+  void Shoot(float halfDegree) {
+    auto w = world.lock();
+    if (!w)
+      return;
+    if (this->halfDegree != halfDegree) {
+      w->UpdateDegree(halfDegree, health, position);
+    }
+
+    auto &particals = w->healthParticals;
+
+    srand(static_cast<unsigned>(time(NULL)));
+    for (auto it = particals.begin(); it != particals.end(); ++it) {
+      if (!(*it))
+        continue;
+      auto randum = rand() % (static_cast<int>(2 * halfDegree * 1000 + 1)) -
+                    halfDegree * 1000;
+      float degree = randum / 1000.0f;
+      float radian = degree * M_PI / 180.0f;
+      SDL_FPoint direct = {0, 0};
+      direct.x = cosf(radian) * shootDirect.x - sinf(radian) * shootDirect.y;
+      direct.y = sinf(radian) * shootDirect.x + cosf(radian) * shootDirect.y;
+      (*it)->direct = direct;
+    }
+  }
+};
+
+} // namespace Particle
+
+} // namespace Foundation
 
 namespace stream {
 
@@ -463,14 +721,13 @@ private:
 
 } // namespace stream
 
-namespace window {
+namespace Foundation {
 
 class Window {
 public:
   Window() {
-    rect.w = rect.h = 50;
     window = SDL_CreateWindow("FFPlayer", SDL_WINDOWPOS_UNDEFINED,
-                              SDL_WINDOWPOS_UNDEFINED, 640, 480,
+                              SDL_WINDOWPOS_UNDEFINED, 850, 600,
                               SDL_WINDOW_RESIZABLE);
     render = SDL_CreateRenderer(
         window, -1,
@@ -478,7 +735,16 @@ public:
             SDL_RENDERER_PRESENTVSYNC | SDL_RENDERER_TARGETTEXTURE);
 
     texture = SDL_CreateTexture(render, SDL_PIXELFORMAT_RGBA8888,
-                                SDL_TEXTUREACCESS_TARGET, 640, 480);
+                                SDL_TEXTUREACCESS_TARGET, 850, 600);
+
+    SDL_SetWindowMinimumSize(window, 750, 400);
+
+    //SDL_FPoint gravity = {0, 0};
+    //world = Foundation::Particle::World::CreateWorld(gravity);
+    //SDL_Point position = {850 / 2, 600};
+    //SDL_FPoint direct = {5, -5};
+    //launcher = Foundation::Particle::Launcher::CreateLauncher(position, direct,
+    //                                                          100, world);
   }
   ~Window() {
     SDL_DestroyTexture(videoTexture);
@@ -491,61 +757,204 @@ public:
     window = nullptr;
   }
 
-  void Paint() {
-    SDL_SetRenderTarget(render, texture);
+  void Paint(AutoFramesPerSecond &fpsCounter) {
+    float eventTime = 0;
+    auto eventFPS = fpsCounter.fps(&eventTime);
 
-    SDL_SetRenderDrawColor(render, 255, 255, 255, 255);
-    SDL_RenderClear(render);
+    float renderFPS = 0;
+    float renderTime = 0;
+    AutoFramesPerSecond renderCounter;
 
-    SDL_Rect rectangle;
-    rectangle.x = rectangle.y = 10;
-    rectangle.w = rectangle.h = 50;
-    SDL_SetRenderDrawColor(render, 255, 0, 0, 255);
-    SDL_RenderDrawRect(render, &rectangle);
-    SDL_SetRenderDrawColor(render, 0, 0, 0, 255);
-    SDL_RenderFillRect(render, &rectangle);
+    static constexpr SDL_Rect rect = {0, 0, 850, 600};
 
-    rect.x = rand() % 600;
-    rect.y = rand() % 400;
-    SDL_RenderDrawRect(render, &rect);
+    SDL_Rect windowRectangle = rect;
+    SDL_GetWindowSize(window, &windowRectangle.w, &windowRectangle.h);
 
-    SDL_SetRenderTarget(render, nullptr);
+    if (windowRectangle.h == 0)
+      return;
 
-    using namespace stream;
-    if (gFFmpegVideoStream) {
-      if (!videoTexture) {
-        videoTexture = SDL_CreateTexture(
-            render, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING,
-            gFFmpegVideoStream->width(), gFFmpegVideoStream->height());
-      }
-
-      SDL_SetRenderTarget(render, videoTexture);
+    // backgroud: 750*480
+    {
+      SDL_SetRenderTarget(render, texture);
+      SDL_SetRenderDrawColor(render, 255, 255, 255, 255);
       SDL_RenderClear(render);
-      gFFmpegVideoStream->Read(videoTexture);
+
       SDL_SetRenderTarget(render, nullptr);
+      SDL_RenderCopy(render, texture, nullptr, nullptr);
     }
 
-    SDL_Rect textureRectangle{0, 0, 200, 150};
-    SDL_RenderCopy(render, texture, nullptr, &textureRectangle);
+    // video: videoRectangle
+    SDL_Rect videoRectangle = windowRectangle;
+    float ratio = windowRectangle.w / windowRectangle.h;
+    if (ratio >= 0.75f) {
+      videoRectangle.h = windowRectangle.h * 0.8f;
+      videoRectangle.w = videoRectangle.h * 4 / 3;
+    }
+    if (ratio < 0.75f || ((windowRectangle.w - videoRectangle.w) < 150)) {
+      videoRectangle.w = windowRectangle.w * 80 / 100;
+      videoRectangle.h = videoRectangle.w * 3 / 4;
+    }
 
-    textureRectangle.x = 200;
-    textureRectangle.y = 150;
-    textureRectangle.w = 440;
-    textureRectangle.h = 330;
-    SDL_RenderCopy(render, videoTexture, nullptr, &textureRectangle);
+    {
+      using namespace stream;
+      if (gFFmpegVideoStream) {
+        if (!videoTexture) {
+          videoTexture = SDL_CreateTexture(
+              render, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING,
+              gFFmpegVideoStream->width(), gFFmpegVideoStream->height());
+        }
+
+        SDL_SetRenderTarget(render, videoTexture);
+        SDL_RenderClear(render);
+        gFFmpegVideoStream->Read(videoTexture);
+        SDL_SetRenderTarget(render, nullptr);
+      }
+
+      SDL_RenderCopy(render, videoTexture, nullptr, &videoRectangle);
+    }
+
+    // Wav: {0, videoRectangle.h, rect.w, rect.h - videoRectangle.h}
+    {
+      SDL_Rect wavRectangle = windowRectangle;
+      wavRectangle.y = videoRectangle.h;
+      wavRectangle.h -= wavRectangle.y;
+      wavRectangle.y += 2;
+      wavRectangle.h -= 4;
+      SDL_SetRenderTarget(render, texture);
+
+      SDL_SetRenderDrawColor(render, 0, 0, 0, 255);
+      SDL_RenderClear(render);
+      SDL_RenderDrawRect(render, &rect);
+      {
+        SDL_BlendMode blendMode = SDL_BLENDMODE_INVALID;
+        SDL_GetRenderDrawBlendMode(render, &blendMode);
+        SDL_SetRenderDrawBlendMode(render, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(render, 230, 230, 230, 200);
+        auto blendRect = rect;
+        blendRect.x += 1;
+        blendRect.y += 5;
+        blendRect.w -= 1;
+        blendRect.h -= 10;
+        SDL_RenderFillRect(render, &blendRect);
+        SDL_SetRenderDrawBlendMode(render, blendMode);
+      }
+
+      {
+        SDL_SetRenderDrawColor(render, 250, 250, 250, 200);
+        SDL_Rect originCoordinate = {0, rect.h / 2, rect.w, 1};
+        {
+          // 纵轴: (0,0)-(0,h)，宽度压缩比不大可以使用SDL_RenderDrawLine
+          SDL_Point start = {0, 0};
+          SDL_Point end = {0, rect.h};
+          SDL_RenderDrawLine(render, start.x, start.y, end.x, end.y);
+        }
+        {
+          // 横轴: (0,h/2)-(w,h/2)，
+          // 高度压缩比过大时使用SDL_RenderDrawLine就无法正常展示了
+          // weight系数设为2px: 横轴会稍粗
+          // weight系数设置1px：在特定比例下进行换算会出现无法展示问题，原因是计算originCoordinate.y时会除以2；我们对实际高度做+1px处理来解决，
+          int weight = 1 * rect.h / wavRectangle.h;
+          originCoordinate.y -= weight / 2;
+          originCoordinate.h = weight + 1;
+
+          SDL_RenderDrawRect(render, &originCoordinate);
+          SDL_RenderFillRect(render, &originCoordinate);
+        }
+
+        if (launcher) {
+          launcher->Shoot(180);
+        }
+
+        if (world) {
+          world->UpdateWorld(render);
+        }
+      }
+
+      SDL_SetRenderTarget(render, nullptr);
+      SDL_RenderCopy(render, texture, nullptr, &wavRectangle);
+    }
+
+    // FPS
+    {
+      SDL_Rect notepadRectangle = windowRectangle;
+      notepadRectangle.x = videoRectangle.w;
+      notepadRectangle.w -= notepadRectangle.x;
+      notepadRectangle.h = videoRectangle.h;
+      SDL_SetRenderTarget(render, texture);
+      SDL_SetRenderDrawColor(render, 250, 250, 250, 255);
+      SDL_RenderClear(render);
+      SDL_SetRenderTarget(render, nullptr);
+      SDL_RenderCopy(render, texture, nullptr, &notepadRectangle);
+
+      renderFPS = renderCounter.fps(&renderTime);
+      notepad.write(render, "eventTime: ", notepadRectangle.x, 10, 50);
+      notepad.write(render, std::to_string(eventTime) + "ms",
+                    notepadRectangle.x + 50, 10, 100);
+      notepad.write(render, "eventFPS: ", notepadRectangle.x, 30, 50);
+      notepad.write(render, std::to_string(eventFPS) + "ms",
+                    notepadRectangle.x + 50, 30, 100);
+      notepad.write(render, "renderTime: ", notepadRectangle.x, 50, 50);
+      notepad.write(render, std::to_string(renderTime) + "ms",
+                    notepadRectangle.x + 50, 50, 100);
+      notepad.write(render, "renderFPS: ", notepadRectangle.x, 70, 50);
+      notepad.write(render, std::to_string(renderFPS) + "ms",
+                    notepadRectangle.x + 50, 70, 100);
+
+      fpsCounter.reset();
+    }
 
     SDL_RenderPresent(render);
-  }
+  } // namespace Foundation
 
 private:
+  Notepad notepad;
   SDL_Window *window = nullptr;
   SDL_Renderer *render = nullptr;
   SDL_Texture *texture = nullptr;
   SDL_Texture *videoTexture = nullptr;
-  SDL_Rect rect;
+  std::shared_ptr<Particle::Launcher> launcher;
+  std::shared_ptr<Particle::World> world;
 };
 
-} // namespace window
+} // namespace Foundation
+
+void RunSimpleFFPlayerDemo() {
+  auto window = std::make_unique<Foundation::Window>();
+
+  using namespace stream;
+  gLocalAudioStream = std::make_unique<AudioStream>(nullptr);
+  gFFmpegVideoStream = std::make_unique<VideoStream>();
+
+  bool quit = false;
+  SDL_Event event;
+  Foundation::AutoFramesPerSecond Counter;
+  while (!quit) {
+    if (SDL_PollEvent(&event)) {
+      switch (event.type) {
+      case SDL_QUIT: {
+        SDL_Log("quit");
+        quit = true;
+      } break;
+      case SDL_KEYUP:
+      case SDL_KEYDOWN: {
+        SDL_Log("event: key down, %d", event.key.type);
+      } break;
+
+      default:
+        SDL_Log("event: %d", event.type);
+        break;
+      }
+    } else {
+      window->Paint(Counter);
+    }
+
+    SDL_Delay(1);
+  }
+
+  gFFmpegVideoStream = nullptr;
+  gLocalAudioStream = nullptr;
+  window = nullptr;
+}
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                       _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine,
@@ -558,34 +967,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
   }
   auto config = avcodec_configuration();
 
-  auto window = std::make_unique<window::Window>();
-
-  using namespace stream;
-  gLocalAudioStream = std::make_unique<AudioStream>(nullptr);
-  gFFmpegVideoStream = std::make_unique<VideoStream>();
-
-  bool quit = false;
-  SDL_Event event;
-  while (!quit) {
-    if (SDL_PollEvent(&event)) {
-      switch (event.type) {
-      case SDL_QUIT: {
-        SDL_Log("quit");
-        quit = true;
-      } break;
-      default:
-        SDL_Log("event: %d", event.type);
-        break;
-      }
-    }
-    window->Paint();
-
-    SDL_Delay(1);
-  }
-
-  gFFmpegVideoStream = nullptr;
-  gLocalAudioStream = nullptr;
-  window = nullptr;
+  RunSimpleFFPlayerDemo();
 
   SDL_Quit();
   return 0;
